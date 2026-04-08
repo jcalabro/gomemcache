@@ -153,6 +153,18 @@ type Client struct {
 	// be set to a number higher than your peak parallel requests.
 	MaxIdleConns int
 
+	// OnPoolGet is called when getFreeConn is attempted.
+	// hit indicates whether a connection was found. poolSize is the pool size after the operation.
+	OnPoolGet func(hit bool, poolSize int)
+
+	// OnPoolPut is called when putFreeConn is attempted.
+	// overflow indicates the connection was closed because the pool was full.
+	// poolSize is the pool size after the operation.
+	OnPoolPut func(overflow bool, poolSize int)
+
+	// OnConnClose is called when condRelease closes a connection due to a non-resumable error.
+	OnConnClose func(err error)
+
 	selector ServerSelector
 
 	mu       sync.Mutex
@@ -209,6 +221,9 @@ func (cn *conn) condRelease(err *error) {
 		cn.release()
 	} else {
 		cn.nc.Close()
+		if cn.c.OnConnClose != nil {
+			cn.c.OnConnClose(*err)
+		}
 	}
 }
 
@@ -221,23 +236,38 @@ func (c *Client) putFreeConn(addr net.Addr, cn *conn) {
 	freelist := c.freeconn[addr.String()]
 	if len(freelist) >= c.maxIdleConns() {
 		cn.nc.Close()
+		if c.OnPoolPut != nil {
+			c.OnPoolPut(true, len(freelist))
+		}
 		return
 	}
 	c.freeconn[addr.String()] = append(freelist, cn)
+	if c.OnPoolPut != nil {
+		c.OnPoolPut(false, len(freelist)+1)
+	}
 }
 
 func (c *Client) getFreeConn(addr net.Addr) (cn *conn, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.freeconn == nil {
+		if c.OnPoolGet != nil {
+			c.OnPoolGet(false, 0)
+		}
 		return nil, false
 	}
 	freelist, ok := c.freeconn[addr.String()]
 	if !ok || len(freelist) == 0 {
+		if c.OnPoolGet != nil {
+			c.OnPoolGet(false, 0)
+		}
 		return nil, false
 	}
 	cn = freelist[len(freelist)-1]
 	c.freeconn[addr.String()] = freelist[:len(freelist)-1]
+	if c.OnPoolGet != nil {
+		c.OnPoolGet(true, len(freelist)-1)
+	}
 	return cn, true
 }
 
